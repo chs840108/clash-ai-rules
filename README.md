@@ -17,47 +17,50 @@
 |---|---|
 | `AI.list` | 规则集本体（mihomo domain behavior，`+.domain` = 后缀匹配） |
 
-## 接入路由器（两种，二选一）
+## 接入方式（2026-10-16 已实施：内网直供）
 
-### 路线 A：经 asailor 中转（改动最小，路由器直接"从本库取"）
+```
+github.com/chs840108/clash-ai-rules      ← 事实源（改这里）
+   │  Cron 每 15 分钟 git pull（SSH）
+   ▼
+192.168.9.102:8787  nginx 容器 clash-rules（只读挂载本目录，restart=always）
+   │  路由器 mihomo 每小时拉取（provider interval: 3600）
+   ▼
+OpenClash 规则 AI (Domain) → 👽 AI1（美国节点）
+```
 
-把本库 raw URL 做 base64，替换 provider 的 url 参数：
+**nginx 容器**（在 192.168.9.102 上，已部署）：
 
 ```bash
-# 在电脑上生成（OpenWrt 没有 base64 命令）
-echo -n 'https://raw.githubusercontent.com/<你的用户名>/clash-ai-rules/main/AI.list' | base64 -w0
+docker run -d --name clash-rules --restart=always \
+  -p 192.168.9.102:8787:80 \
+  -v /home/agentadmin/clash-ai-rules:/usr/share/nginx/html:ro \
+  192.168.9.9/dockerhub-cache/library/nginx:1.27-alpine
 ```
 
-然后改 `/etc/openclash/config/merged.yaml` 中 `AI (Domain)` provider 的：
+**路由器 provider**（`/etc/openclash/config/merged.yaml`）：
 
 ```yaml
-url: "https://api.asailor.org/getruleset?type=3&url=<上面的base64>"
-```
-
-> 注意：仍需依赖 asailor 服务存活（现状本来就在依赖它）。
-
-### 路线 B：内网同步（零外网依赖，最稳）
-
-路由器改用 `type: file` provider，由 192.168.9.102 定期把本库同步到路由器：
-
-```yaml
-rule-providers:
   AI (Domain):
-    type: file
+    type: http
     behavior: domain
-    path: "./rule_provider/ai-custom.yaml"
-    format: yaml
+    url: "http://192.168.9.102:8787/AI.list"
+    interval: 3600
 ```
 
-同步脚本（192.168.9.102）：
+**生效延迟**：改库 → ≤15 分钟（git pull）→ ≤1 小时（路由器重拉）。
+想立即生效（无需重启）：
 
 ```bash
-cd ~/clash-ai-rules && git pull -q
-scp AI.list root@192.168.9.1:/etc/openclash/rule_provider/ai-custom.yaml
-# 通过 mihomo API 热刷新（无需重启 OpenClash）
 curl -s -X PUT -H "Authorization: Bearer <路由器root密码>" \
-  http://192.168.9.1:9090/providers/rules/AI%20%28Domain%29
+  'http://192.168.9.1:9090/providers/rules/AI%20%28Domain%29'
 ```
+
+### ❌ 已否决：asailor 中转自建库
+
+实测 asailor 对自建库统一返回 `payload: ['--placeholder--']`（只转它认识的已知 URL）；
+更危险的是**若服务降级，会把规则集静默替换成占位符，AI 分流悄无声息全废**。
+（注：`AI2 (Domain)` 目前仍走 asailor 的已知上游 URL，暂未动。）
 
 ## 维护注意
 
